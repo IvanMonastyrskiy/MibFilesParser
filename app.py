@@ -156,6 +156,7 @@ class MainWindow(QMainWindow):
         panel = QWidget()
 
         layout = QVBoxLayout(panel)
+
         layout.setSpacing(8)
 
         group = QGroupBox("Файлы")
@@ -330,7 +331,11 @@ class MainWindow(QMainWindow):
     def _apply_style(self):
 
         self.setStyleSheet(
-            """
+            """ 
+            QMenuBar {
+                background-color: #D3D3D3;
+                color: white;
+            }
             QWidget {
                 font-family: Segoe UI;
                 font-size: 9pt;
@@ -340,44 +345,29 @@ class MainWindow(QMainWindow):
                 background:#F0F0F0;
             }
             QGroupBox {
-                border:
-                1px solid #B8B8B8;
-                margin-top:
-                8px;
-                padding:
-                6px;
-                font-weight:
-                bold;
-                background:
-                #FAFAFA;
+                border: 1px solid #B8B8B8;
+                margin-top: 8px;
+                padding: 6px;
+                font-weight: bold;
+                background: #FAFAFA;
             }
             QGroupBox::title {
-                subcontrol-origin:
-                margin;
-                left:
-                8px;
+                subcontrol-origin: margin;
+                left: 8px;
             }
             QLineEdit {
-                border:
-                1px solid #999;
-                padding:
-                3px;
-                background:
-                white;
+                border: 1px solid #999;
+                padding: 3px;
+                background: white;
             }
             QPushButton {
-                min-height:
-                24px;
-                padding:
-                3px 10px;
-                border:
-                1px solid #888;
-                background:
-                #EAEAEA;
+                min-height: 24px;
+                padding: 3px 10px;
+                border: 1px solid #888;
+                background: #EAEAEA;
             }
             QPushButton:hover {
-                background:
-                #DCDCDC;
+                background: #DCDCDC;
             }
             QPlainTextEdit {
                 background: #1E1E1E;
@@ -386,12 +376,9 @@ class MainWindow(QMainWindow):
                 selection-background-color: #3A6EA5;
             }
             QTableWidget {
-                background:
-                white;
-                gridline-color:
-                #BFBFBF;
-                border:
-                1px solid #999;
+                background: white;
+                gridline-color: #BFBFBF;
+                border: 1px solid #999;
             }
             QHeaderView::section {
                background: #E0E0E0;
@@ -401,8 +388,7 @@ class MainWindow(QMainWindow):
                 font-weight: bold;
             }
             QStatusBar {
-                background:
-                #E5E5E5;
+                background: #E5E5E5;
             }
             """
         )
