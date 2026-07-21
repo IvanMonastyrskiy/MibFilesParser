@@ -48,7 +48,7 @@ def find_files_with_keyword(directory, keyword):
     input_files = []
     for root, _dirs, files in os.walk(directory):
         for file in files:
-            if file.endswith(".mib"):
+            if file.lower().endswith(".mib"):
                 file_path = os.path.join(root, file)
                 try:
                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
@@ -63,14 +63,19 @@ def find_files_with_keyword(directory, keyword):
 
 def find_mib_path(mib_name, dirs):
     """Ищет файл <mib_name>.mib рекурсивно во всех переданных директориях
-    (и их произвольно вложенных подпапках), а не только на верхнем уровне."""
-    target = mib_name + ".mib"
+    (и их произвольно вложенных подпапках), а не только на верхнем уровне.
+    Сравнение имени файла регистронезависимое: Windows сама не различает
+    регистр в именах файлов, а обычное 'x in list' в Python — различает,
+    из-за чего файл вида 'snmpv2-conf.mib' не находился при поиске
+    'SNMPv2-CONF.mib', хотя физически лежал в папке."""
+    target = (mib_name + ".mib").lower()
     for d in dirs:
         if not os.path.isdir(d):
             continue
         for root, _dirs, files in os.walk(d):
-            if target in files:
-                return os.path.join(root, target)
+            for fname in files:
+                if fname.lower() == target:
+                    return os.path.join(root, fname)
     return None
 
 
@@ -208,11 +213,12 @@ def collect_notifications(dirs):
             continue
         for root, _dirs, files in os.walk(directory_path):
             for mib_file in files:
-                if not mib_file.endswith(".mib"):
+                if not mib_file.lower().endswith(".mib"):
                     continue
-                if mib_file in processed_names:
+                dedup_key = mib_file.lower()
+                if dedup_key in processed_names:
                     continue
-                processed_names.add(mib_file)
+                processed_names.add(dedup_key)
                 file_path = os.path.join(root, mib_file)
                 try:
                     results = parse_mib_file(file_path)
@@ -245,6 +251,14 @@ def run_pipeline(input_dir, output_dir, log_callback=None, keyword="NOTIFICATION
     # выделять "common" (или любую другую) подпапку больше не нужно —
     # она и так попадёт в обход.
     mib_dirs = [input_dir]
+
+    total_mib_count = sum(
+        1
+        for _root, _dirs, files in os.walk(input_dir)
+        for f in files
+        if f.lower().endswith(".mib")
+    )
+    log(f"Всего .mib файлов видно в '{input_dir}' (со всеми подпапками): {total_mib_count}")
 
     log(f"Поиск файлов с кодовым словом '{keyword}' (рекурсивно по всем подпапкам)...")
     input_files = find_files_with_keyword(input_dir, keyword)
@@ -315,21 +329,33 @@ def run_pipeline(input_dir, output_dir, log_callback=None, keyword="NOTIFICATION
     matched_mib_names = {
         _normalize_mib_name(mib_name) for mib_name, _line_no, _line in errors_found
     }
+    # У pysmi статус результата — это не только "compiled"/"failed". Есть ещё
+    # "missing" (не нашли файл зависимости), "unprocessed" (не смогли дойти
+    # до компиляции из-за ошибки выше по цепочке зависимостей) и т.п.
+    # Раньше здесь проверялся только "failed", поэтому такие MIB тихо
+    # пропадали: не попадали в errors_found, и в конце скрипт мог написать
+    # "ошибок компиляции не обнаружено", хотя реально ничего не собралось.
+    # Успешными считаем только два статуса — всё остальное считаем ошибкой.
+    success_statuses = {"compiled", "untouched"}
     for mib_name, status in results.items():
-        if str(status) == "failed" and _normalize_mib_name(mib_name) not in matched_mib_names:
-            fallback_line = (
-                f"failing on unknown reason at MIB {mib_name}, line ?"
+        status_str = str(status)
+        if status_str in success_statuses:
+            continue
+        if _normalize_mib_name(mib_name) in matched_mib_names:
+            continue
+        fallback_line = f"failing with status '{status_str}' at MIB {mib_name}, line ?"
+        log(fallback_line)
+        errors_found.append(
+            (
+                mib_name,
+                "?",
+                f"{fallback_line} "
+                f"(детальная причина не найдена в логе pysmi; если статус "
+                f"'missing' — скорее всего не найден файл MIB-зависимости в "
+                f"указанной папке; если 'unprocessed' — компиляция не выполнена "
+                f"из-за ошибки в другом MIB, от которого этот зависит)",
             )
-            log(fallback_line)
-            errors_found.append(
-                (
-                    mib_name,
-                    "?",
-                    f"{fallback_line} "
-                    f"(детальная причина не найдена в логе pysmi, "
-                    f"проверьте компилируемый файл вручную)",
-                )
-            )
+        )
 
     log("Сбор данных из скомпилированных JSON...")
     virtual_file = process_compiled_directory(dst_directory)
