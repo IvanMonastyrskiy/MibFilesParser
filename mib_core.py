@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import re
+import shutil
 
 import pandas as pd
 
@@ -61,10 +62,15 @@ def find_files_with_keyword(directory, keyword):
 
 
 def find_mib_path(mib_name, dirs):
+    """Ищет файл <mib_name>.mib рекурсивно во всех переданных директориях
+    (и их произвольно вложенных подпапках), а не только на верхнем уровне."""
+    target = mib_name + ".mib"
     for d in dirs:
-        candidate = os.path.join(d, mib_name + ".mib")
-        if os.path.exists(candidate):
-            return candidate
+        if not os.path.isdir(d):
+            continue
+        for root, _dirs, files in os.walk(d):
+            if target in files:
+                return os.path.join(root, target)
     return None
 
 
@@ -73,7 +79,7 @@ def read_mib_from_dirs(mib_name, dirs):
     if path is None:
         searched = ", ".join(dirs)
         raise PySmiReaderFileNotFoundError(
-            f"MIB '{mib_name}.mib' не найден ни в одной из папок: {searched}",
+            f"MIB '{mib_name}.mib' не найден ни в одной из папок (включая подпапки): {searched}",
             reader=None,
         )
     with open(path, encoding="utf-8", errors="ignore") as f:
@@ -161,6 +167,7 @@ def process_compiled_directory(directory):
 
 def parse_mib_file(file_path):
     """Извлекает NOTIFICATION-TYPE и их DESCRIPTION из .mib файла."""
+
     results = []
     with open(file_path, "r", encoding="utf-8", errors="ignore") as file:
         lines = file.readlines()
@@ -191,30 +198,34 @@ def parse_mib_file(file_path):
 
 
 def collect_notifications(dirs):
-    """Обрабатывает .mib файлы из нескольких папок для поиска NOTIFICATION-TYPE."""
+    """Обрабатывает .mib файлы из нескольких папок (рекурсивно, включая
+    произвольно вложенные подпапки) для поиска NOTIFICATION-TYPE."""
     all_results = []
     processed_names = set()
 
     for directory_path in dirs:
         if not os.path.isdir(directory_path):
             continue
-        mib_files = [f for f in os.listdir(directory_path) if f.endswith(".mib")]
-        for mib_file in mib_files:
-            if mib_file in processed_names:
-                continue
-            processed_names.add(mib_file)
-            file_path = os.path.join(directory_path, mib_file)
-            try:
-                results = parse_mib_file(file_path)
-                all_results.extend(results)
-            except Exception:
-                pass
+        for root, _dirs, files in os.walk(directory_path):
+            for mib_file in files:
+                if not mib_file.endswith(".mib"):
+                    continue
+                if mib_file in processed_names:
+                    continue
+                processed_names.add(mib_file)
+                file_path = os.path.join(root, mib_file)
+                try:
+                    results = parse_mib_file(file_path)
+                    all_results.extend(results)
+                except Exception:
+                    pass
     return all_results
 
 
 def run_pipeline(input_dir, output_dir, log_callback=None, keyword="NOTIFICATION-TYPE"):
     """
-    параметр input_dir: папка с исходными MIB-файлами (в ней же ищется подпапка common)
+    параметр input_dir: папка с исходными MIB-файлами (поиск и зависимостей,
+        и самих файлов ведётся рекурсивно по всем вложенным подпапкам)
     параметр output_dir: папка, куда сохранять результаты
     параметр log_callback: функция callback(str), вызывается для каждой строки лога
     параметр keyword: кодовое слово для отбора файлов (по умолчанию NOTIFICATION-TYPE)
@@ -230,18 +241,13 @@ def run_pipeline(input_dir, output_dir, log_callback=None, keyword="NOTIFICATION
 
     os.makedirs(output_dir, exist_ok=True)
 
-    common_dir = os.path.join(input_dir, "common")
-    mib_dirs = [input_dir, common_dir]
+    # Поиск ведётся рекурсивно по всей input_dir, поэтому отдельно
+    # выделять "common" (или любую другую) подпапку больше не нужно —
+    # она и так попадёт в обход.
+    mib_dirs = [input_dir]
 
-    log(f"Поиск файлов с кодовым словом '{keyword}'...")
-    input_files = []
-    seen_names = set()
-    for d in mib_dirs:
-        if os.path.isdir(d):
-            for name in find_files_with_keyword(d, keyword):
-                if name not in seen_names:
-                    seen_names.add(name)
-                    input_files.append(name)
+    log(f"Поиск файлов с кодовым словом '{keyword}' (рекурсивно по всем подпапкам)...")
+    input_files = find_files_with_keyword(input_dir, keyword)
 
     log(f"Найдено файлов: {len(input_files)}")
     log(str(input_files))
@@ -252,6 +258,13 @@ def run_pipeline(input_dir, output_dir, log_callback=None, keyword="NOTIFICATION
         )
 
     dst_directory = os.path.join(output_dir, "output")
+    # На Windows FileWriter пишет через os.rename(tmp, target), а rename не
+    # может перезаписать существующий файл (WinError 183). Поэтому при
+    # повторном запуске в тот же output_dir компиляция "падает" на уже
+    # существующих файлах и результат тихо не обновляется. Чтобы такого не
+    # было, перед каждым запуском полностью очищаем папку с результатами.
+    if os.path.isdir(dst_directory):
+        shutil.rmtree(dst_directory)
     os.makedirs(dst_directory, exist_ok=True)
 
     mib_compiler = MibCompiler(
@@ -361,10 +374,10 @@ def run_pipeline(input_dir, output_dir, log_callback=None, keyword="NOTIFICATION
     error_log_path = None
     if errors_found:
         error_log_path = os.path.join(output_dir, "mib_compile_errors.log")
-        with open(error_log_path, "a", encoding="utf-8") as err_file:
+        with open(error_log_path, "w", encoding="utf-8") as err_file:
             for mib_name, line_no, raw_log_line in errors_found:
                 mib_file_path = find_mib_path(mib_name, mib_dirs) or (
-                    f"{mib_name}.mib (не найден ни в {input_dir}, ни в {common_dir})"
+                    f"{mib_name}.mib (не найден ни в {input_dir}, ни в его подпапках)"
                 )
                 err_file.write("\n")
                 err_file.write(f"{datetime.datetime.now()} \n")
