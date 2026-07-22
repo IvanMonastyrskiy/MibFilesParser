@@ -444,8 +444,7 @@ class MainWindow(QMainWindow):
                 QTableWidgetItem("0")
             )
 
-    # Уровни и их оформление. "STAGE" используется для заголовков этапов
-    # пайплайна.
+    # Уровни и их оформление. "STAGE" используется для заголовков этапов  пайплайна.
     _LOG_LEVEL_STYLES = {
         "ERROR": "#F87171",
         "WARN": "#FBBF24",
