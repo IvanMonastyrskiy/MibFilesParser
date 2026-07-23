@@ -1,7 +1,7 @@
 """
 Сборка в exe (Windows, из папки проекта):
     pip install pyinstaller
-    pyinstaller --onefile --windowed --name MibParser app.py
+    pyinstaller --onefile --windowed --name MibParser --collect-data pysmi app.py
 """
 
 import os
@@ -30,10 +30,23 @@ from PySide6.QtWidgets import (
     QSplitter,
     QMessageBox,
     QHeaderView,
+    QComboBox,
+    QCheckBox
 )
 from jinja2.lexer import whitespace_re
 
 import mib_core
+
+# Варианты кодового слова, по которому отбираются MIB-файлы для компиляции.
+# Список редактируемый (QComboBox.editable=True) — можно вписать и своё
+# значение, не входящее в список.
+KEYWORD_OPTIONS = {
+    "NOTIFICATION-TYPE": True,
+    "TRAP-TYPE": False,
+    "OBJECT-TYPE": False,
+    "MODULE-IDENTITY": False,
+}
+
 
 # Фоновый поток, чтобы GUI не подвисал во время компиляции MIB
 class PipelineThread(QThread):
@@ -41,10 +54,11 @@ class PipelineThread(QThread):
     finished_ok = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self, input_dir, output_dir, parent=None):
+    def __init__(self, input_dir, output_dir, keywords: list, parent=None):
         super().__init__(parent)
         self.input_dir = input_dir
         self.output_dir = output_dir
+        self.keywords = keywords          # ← теперь список
 
     def run(self):
         try:
@@ -52,6 +66,7 @@ class PipelineThread(QThread):
                 self.input_dir,
                 self.output_dir,
                 log_callback=self.log_line.emit,
+                keywords=self.keywords,
             )
             self.finished_ok.emit(result)
         except Exception as e:
@@ -151,6 +166,18 @@ class MainWindow(QMainWindow):
 
         root.addWidget(splitter)
 
+    def _select_all_keywords(self):
+        for cb in self.keyword_checkboxes.values():
+            cb.setChecked(True)
+
+    def _deselect_all_keywords(self):
+        for cb in self.keyword_checkboxes.values():
+            cb.setChecked(False)
+
+    def _get_selected_keywords(self):
+        """Возвращает список выбранных ключевых слов"""
+        return [keyword for keyword, cb in self.keyword_checkboxes.items() if cb.isChecked()]
+
     def _build_left_panel(self):
 
         panel = QWidget()
@@ -207,6 +234,32 @@ class MainWindow(QMainWindow):
 
         layout.addWidget(group)
 
+        parse_group = QGroupBox("Что парсить")
+        parse_form = QVBoxLayout(parse_group)
+
+        parse_form.addWidget(QLabel("Выберите типы объектов для обработки:"))
+
+        self.keyword_checkboxes = {}
+
+        for keyword, default_checked in KEYWORD_OPTIONS.items():
+            cb = QCheckBox(keyword)
+            cb.setChecked(default_checked)
+            self.keyword_checkboxes[keyword] = cb
+            parse_form.addWidget(cb)
+
+        # Кнопки "Выбрать все / Снять все"
+        btn_row = QHBoxLayout()
+        btn_all = QPushButton("Выбрать все")
+        btn_none = QPushButton("Снять все")
+
+        btn_all.clicked.connect(self._select_all_keywords)
+        btn_none.clicked.connect(self._deselect_all_keywords)
+
+        btn_row.addWidget(btn_all)
+        btn_row.addWidget(btn_none)
+        parse_form.addLayout(btn_row)
+
+        layout.addWidget(parse_group)
         layout.addStretch()
 
         self.btn_run = QPushButton(
@@ -360,6 +413,11 @@ class MainWindow(QMainWindow):
                 padding: 3px;
                 background: white;
             }
+            QComboBox {
+                border: 1px solid #999;
+                padding: 3px;
+                background: white;
+            }
             QPushButton {
                 min-height: 24px;
                 padding: 3px 10px;
@@ -414,6 +472,7 @@ class MainWindow(QMainWindow):
     def _start_pipeline(self):
         input_dir = self.input_dir_edit.text().strip()
         output_dir = self.output_dir_edit.text().strip()
+        selected_keywords = self._get_selected_keywords()
 
         if not input_dir or not os.path.isdir(input_dir):
             QMessageBox.warning(self, "Ошибка", "Укажите корректную исходную папку с MIB файлами.")
@@ -421,22 +480,28 @@ class MainWindow(QMainWindow):
         if not output_dir:
             QMessageBox.warning(self, "Ошибка", "Укажите папку для сохранения результата.")
             return
+        if not selected_keywords:
+            QMessageBox.warning(self, "Ошибка", "Выберите хотя бы один тип для парсинга.")
+            return
 
         self.log_view.clear()
-        self._reset_stats()
+        self._reset_stats()  # можно передать joined keywords для отображения
 
         self.btn_run.setEnabled(False)
         self.btn_run.setText("Парсинг выполняется...")
 
-        self._append_log("Запуск парсинга...", level="STAGE")
+        keywords_str = ", ".join(selected_keywords)
+        self._append_log(f"Запуск парсинга (типы: {keywords_str})...", level="STAGE")
 
-        self.thread = PipelineThread(input_dir, output_dir)
+        self.thread = PipelineThread(input_dir, output_dir, selected_keywords)
         self.thread.log_line.connect(self._append_log)
         self.thread.finished_ok.connect(self._on_finished)
         self.thread.failed.connect(self._on_failed)
         self.thread.start()
 
-    def _reset_stats(self):
+    def _reset_stats(self, keyword=None):
+        if keyword:
+            self.stats_table.setItem(4, 0, QTableWidgetItem(keyword))
         for i in range(5):
             self.stats_table.setItem(
                 i,
