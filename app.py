@@ -31,21 +31,35 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QHeaderView,
     QComboBox,
-    QCheckBox
+    QCheckBox,
+    QTabWidget,
+    QTreeWidget,
+    QTreeWidgetItem,
 )
 from jinja2.lexer import whitespace_re
 
 import mib_core
 
 # Варианты кодового слова, по которому отбираются MIB-файлы для компиляции.
-# Список редактируемый (QComboBox.editable=True) — можно вписать и своё
-# значение, не входящее в список.
 KEYWORD_OPTIONS = {
     "NOTIFICATION-TYPE": True,
     "TRAP-TYPE": False,
     "OBJECT-TYPE": False,
     "MODULE-IDENTITY": False,
 }
+
+# Поля атрибутов объекта, показываемые в панели снизу дерева MIB, и то, каким
+# ключом они достаются из строки DataFrame (см. mib_core.parse_json_file).
+DETAIL_FIELDS = [
+    ("Name", "name"),
+    ("OID", "oid"),
+    ("Mib", "file_name"),
+    ("Syntax", "syntax_display"),
+    ("Access", "maxaccess"),
+    ("Status", "status"),
+    ("DefVal", "defval_display"),
+    ("Indexes", "indices_display"),
+]
 
 
 # Фоновый поток, чтобы GUI не подвисал во время компиляции MIB
@@ -58,7 +72,7 @@ class PipelineThread(QThread):
         super().__init__(parent)
         self.input_dir = input_dir
         self.output_dir = output_dir
-        self.keywords = keywords          # ← теперь список
+        self.keywords = keywords          # ← список
 
     def run(self):
         try:
@@ -71,6 +85,7 @@ class PipelineThread(QThread):
             self.finished_ok.emit(result)
         except Exception as e:
             self.failed.emit(f"{e}\n\n{traceback.format_exc()}")
+
 
 # Небольшая карточка статистики
 class StatCard(QFrame):
@@ -103,12 +118,13 @@ class StatCard(QFrame):
     def set_value(self, value):
         self.value_label.setText(str(value))
 
+
 # Главное окно
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("MIB Parser")
-        self.resize(1200, 800)
+        self.resize(1300, 850)
 
         self.thread = None
         self.last_result = None
@@ -149,6 +165,7 @@ class MainWindow(QMainWindow):
                 "Инструмент анализа и компиляции MIB файлов"
             )
         )
+
     def _build_ui(self):
 
         central = QWidget()
@@ -162,7 +179,7 @@ class MainWindow(QMainWindow):
         splitter.addWidget(self._build_left_panel())
         splitter.addWidget(self._build_right_panel())
 
-        splitter.setSizes([260, 900])
+        splitter.setSizes([260, 1000])
 
         root.addWidget(splitter)
 
@@ -289,10 +306,23 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_right_panel(self):
+        """Правая часть окна — вкладки: 'Журнал и статистика' и 'Дерево MIB'."""
+
+        tabs = QTabWidget()
+
+        tabs.addTab(self._build_log_tab(), "Журнал и статистика")
+        tabs.addTab(self._build_mib_tree_tab(), "Дерево MIB")
+
+        return tabs
+
+    def _build_log_tab(self):
 
         panel = QWidget()
 
         layout = QVBoxLayout(panel)
+
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
 
         log_box = QGroupBox(
             "Журнал выполнения"
@@ -375,6 +405,55 @@ class MainWindow(QMainWindow):
 
         return panel
 
+    def _build_mib_tree_tab(self):
+        """Вкладка 'Дерево MIB': иерархия объектов по OID сверху, атрибуты
+        выбранного объекта (Name, OID, Mib, Syntax, Access, Status, DefVal,
+        Indexes, Descr) — снизу, как в MIB Browser."""
+
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+
+        splitter = QSplitter(Qt.Vertical)
+
+        # --- Дерево ----------------------------------------------------
+        tree_box = QGroupBox("Дерево MIB (иерархия по OID)")
+        tree_layout = QVBoxLayout(tree_box)
+
+        self.mib_tree = QTreeWidget()
+        self.mib_tree.setHeaderLabels(["Объект"])
+        self.mib_tree.setColumnCount(1)
+        self.mib_tree.currentItemChanged.connect(self._on_tree_selection_changed)
+
+        tree_layout.addWidget(self.mib_tree)
+        splitter.addWidget(tree_box)
+
+        # --- Атрибуты выбранного объекта --------------------------------
+        detail_box = QGroupBox("Атрибуты выбранного объекта")
+        detail_layout = QGridLayout(detail_box)
+        detail_layout.setColumnStretch(1, 1)
+
+        self.detail_fields = {}
+        for row, (label_text, _key) in enumerate(DETAIL_FIELDS):
+            detail_layout.addWidget(QLabel(label_text + ":"), row, 0)
+            edit = QLineEdit()
+            edit.setReadOnly(True)
+            detail_layout.addWidget(edit, row, 1)
+            self.detail_fields[label_text] = edit
+
+        descr_row = len(DETAIL_FIELDS)
+        detail_layout.addWidget(QLabel("Descr:"), descr_row, 0, Qt.AlignTop)
+        self.descr_view = QPlainTextEdit()
+        self.descr_view.setReadOnly(True)
+        self.descr_view.setMaximumHeight(110)
+        detail_layout.addWidget(self.descr_view, descr_row, 1)
+
+        splitter.addWidget(detail_box)
+        splitter.setSizes([550, 250])
+
+        layout.addWidget(splitter)
+
+        return panel
+
     @staticmethod
     def _section_label(text):
         lbl = QLabel(text)
@@ -395,18 +474,24 @@ class MainWindow(QMainWindow):
                 color: black;
             }
             QMainWindow {
-                background:#F0F0F0;
+                background: #F7F7F7;
             }
             QGroupBox {
                 border: 1px solid #B8B8B8;
-                margin-top: 8px;
-                padding: 6px;
-                font-weight: bold;
+                border-radius: 6px;
+                margin-top: 16px;
+                padding-top: 10px;
                 background: #FAFAFA;
+                font-weight: bold;
             }
+
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 8px;
+                subcontrol-position: top left;
+                left: 12px;
+                padding: 0 6px;
+                background: #FAFAFA;
+                color: black;
             }
             QLineEdit {
                 border: 1px solid #999;
@@ -428,14 +513,18 @@ class MainWindow(QMainWindow):
                 background: #DCDCDC;
             }
             QPlainTextEdit {
-                background: #1E1E1E;
-                color: #D4D4D4;
-                border: 1px solid #555555;
-                selection-background-color: #3A6EA5;
+                background: #2B2B2B;
+                color: #F0F0F0;
+                border: 1px solid #B8B8B8;
+                border-radius: 4px;
             }
             QTableWidget {
                 background: white;
                 gridline-color: #BFBFBF;
+                border: 1px solid #999;
+            }
+            QTreeWidget {
+                background: white;
                 border: 1px solid #999;
             }
             QHeaderView::section {
@@ -485,7 +574,8 @@ class MainWindow(QMainWindow):
             return
 
         self.log_view.clear()
-        self._reset_stats()  # можно передать joined keywords для отображения
+        self._reset_stats()
+        self._clear_mib_tree()
 
         self.btn_run.setEnabled(False)
         self.btn_run.setText("Парсинг выполняется...")
@@ -508,6 +598,15 @@ class MainWindow(QMainWindow):
                 1,
                 QTableWidgetItem("0")
             )
+
+    def _clear_mib_tree(self):
+        self.mib_tree.clear()
+        self._clear_detail_fields()
+
+    def _clear_detail_fields(self):
+        for edit in self.detail_fields.values():
+            edit.clear()
+        self.descr_view.clear()
 
     # Уровни и их оформление. "STAGE" используется для заголовков этапов  пайплайна.
     _LOG_LEVEL_STYLES = {
@@ -557,6 +656,89 @@ class MainWindow(QMainWindow):
             .replace(">", "&gt;")
         )
 
+    # ------------------------------------------------------- дерево MIB ---
+    def _populate_mib_tree(self, df):
+        """Строит иерархическое дерево объектов по OID (как в MIB Browser).
+
+        Родителем объекта считается объект из этого же набора данных с
+        наибольшим по длине OID, являющимся строгим префиксом OID текущего
+        объекта. Если такого нет — объект становится корневым узлом дерева.
+        Объекты без валидного числового OID (например, определения типов
+        TEXTUAL-CONVENTION) в дереве не показываются — у них просто нет OID.
+        """
+        self.mib_tree.clear()
+
+        if df is None or len(df) == 0:
+            return
+
+        records = df.to_dict(orient="records")
+
+        valid_records = []
+        for rec in records:
+            oid_str = rec.get("oid")
+            if not oid_str or not isinstance(oid_str, str):
+                continue
+            try:
+                oid_tuple = tuple(int(part) for part in oid_str.strip().split("."))
+            except ValueError:
+                continue
+            if not oid_tuple:
+                continue
+            rec["_oid_tuple"] = oid_tuple
+            valid_records.append(rec)
+
+        if not valid_records:
+            return
+
+        # Родитель ищется быстро: по очереди отрезаем последний элемент OID и
+        # проверяем, есть ли уже узел с таким OID в дереве. Сортировка по
+        # возрастанию OID гарантирует, что потенциальный родитель уже создан
+        # к моменту обработки потомка (префикс всегда "меньше" по кортежу).
+        valid_records.sort(key=lambda r: r["_oid_tuple"])
+
+        items_by_oid = {}
+        for rec in valid_records:
+            oid_tuple = rec["_oid_tuple"]
+
+            parent_item = None
+            for cut in range(len(oid_tuple) - 1, 0, -1):
+                prefix = oid_tuple[:cut]
+                if prefix in items_by_oid:
+                    parent_item = items_by_oid[prefix]
+                    break
+
+            label = f"{rec.get('name') or '?'}  [{oid_tuple[-1]}]"
+            item = QTreeWidgetItem([label])
+            item.setData(0, Qt.UserRole, rec)
+
+            if parent_item is not None:
+                parent_item.addChild(item)
+            else:
+                self.mib_tree.addTopLevelItem(item)
+
+            # Если OID повторяется (редкий случай — объект встретился дважды),
+            # оставляем в индексе первый узел, чтобы не путать родителей.
+            items_by_oid.setdefault(oid_tuple, item)
+
+        self.mib_tree.expandToDepth(1)
+
+    def _on_tree_selection_changed(self, current, _previous):
+        if current is None:
+            self._clear_detail_fields()
+            return
+
+        rec = current.data(0, Qt.UserRole)
+        if not rec:
+            self._clear_detail_fields()
+            return
+
+        for label_text, key in DETAIL_FIELDS:
+            value = rec.get(key)
+            self.detail_fields[label_text].setText("" if value is None else str(value))
+
+        descr = rec.get("description")
+        self.descr_view.setPlainText("" if descr is None else str(descr))
+
     def _on_finished(self, result):
         self.btn_run.setEnabled(True)
         self.btn_run.setText("Запустить парсинг")
@@ -577,6 +759,8 @@ class MainWindow(QMainWindow):
                 1,
                 QTableWidgetItem(str(value))
             )
+
+        self._populate_mib_tree(result.get("df"))
 
         self._append_log(f"Готово. CSV: {result['output_csv']}", level="OK")
         if result.get("error_log"):

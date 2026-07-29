@@ -38,19 +38,7 @@ def _build_known_correct_names(text):
 
 
 def _fix_type_definition_case(text):
-    """Правит регистр в объявлениях типов (см. _TYPE_DEF_RE выше). Сначала
-    пробует найти "эталон" — правильную (заглавную) форму имени, встречающуюся
-    где-то ещё в файле (самый надёжный случай — совпадение подтверждено
-    вторым использованием). Если эталона нет — по грамматике SMI имя типа в
-    этой позиции ВСЕГДА обязано начинаться с заглавной буквы (иного не дано),
-    поэтому можно безопасно поднять регистр только первой буквы, не трогая
-    остальную часть идентификатора — это не догадка, а прямое следствие
-    грамматики; хуже не станет, файл и так был непарсибелен.
-    Не трогает присваивания значений объектам ('::= { parent N }') —
-    там форма со строчной буквы правильна по конвенции.
-
-    Возвращает (исправленный_текст, список_исправлений [(было, стало, признак_эталона), ...]).
-    """
+    """Правит регистр в объявлениях типов (см. _TYPE_DEF_RE выше)."""
     correct_names = _build_known_correct_names(text)
     fixes = []
 
@@ -59,7 +47,6 @@ def _fix_type_definition_case(text):
         correct_name = correct_names.get(declared_name.lower())
         has_reference = bool(correct_name) and correct_name != declared_name
         if not has_reference:
-            # Эталона нет — поднимаем регистр только первой буквы.
             fallback_name = declared_name[0].upper() + declared_name[1:]
             if fallback_name == declared_name:
                 return match.group(0)
@@ -71,40 +58,23 @@ def _fix_type_definition_case(text):
     return fixed_text, fixes
 
 
-# =============================================================================
-# Санитайзер MIB-текста — набор независимых, безопасных автоисправлений
-# распространённых опечаток/артефактов у разных вендоров, плюс диагностика
-# случаев, которые чинить автоматически рискованно (можно ошибочно "съесть"
-# кусок реального текста). Каждый fixer получает текст и возвращает
-# (новый_текст, список_исправлений). Ничего не пишется на диск — правки
-# применяются только к тексту в памяти перед тем, как отдать его pysmi.
-# =============================================================================
-
-# Заголовок модуля: <Имя> DEFINITIONS ::= BEGIN. Та же проблема с регистром,
-# что и в _fix_type_definition_case, но здесь "эталон" — это mib_name, под
-# которым модуль запрашивают другие (рабочие) файлы через IMPORTS ... FROM.
 _MODULE_HEADER_RE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9-]*)(\s+DEFINITIONS\b)", re.MULTILINE)
 
-# Юникод-пробелы, которые визуально неотличимы от обычного пробела, но
-# лексер SMI их пробелом не считает — частый мусор при копипасте из Word/PDF.
 _UNICODE_SPACES = {
-    "\u00a0": " ",  # неразрывный пробел (NBSP)
-    "\u2007": " ",  # figure space
-    "\u2009": " ",  # thin space
-    "\u200b": "",   # zero-width space — не пробел вообще, просто убираем
-    "\ufeff": "",   # BOM, если затесался не в начале файла
+    "\u00a0": " ",
+    "\u2007": " ",
+    "\u2009": " ",
+    "\u200b": "",
+    "\ufeff": "",
 }
 
 _SMART_QUOTES = {
-    "\u2018": "'", "\u2019": "'",   # ‘ ’
-    "\u201c": '"', "\u201d": '"',   # “ ”
+    "\u2018": "'", "\u2019": "'",
+    "\u201c": '"', "\u201d": '"',
 }
 
 
 def _fix_module_header_case(text, mib_name):
-    """Правит регистр в самом заголовке модуля (<Имя> DEFINITIONS ::= BEGIN),
-    если он не совпадает с mib_name, под которым модуль запрашивают другие
-    файлы, но совпадает с ним без учёта регистра."""
     match = _MODULE_HEADER_RE.search(text)
     if not match:
         return text, []
@@ -117,8 +87,6 @@ def _fix_module_header_case(text, mib_name):
 
 
 def _fix_unicode_whitespace(text):
-    """Заменяет неразрывные/невидимые юникод-пробелы на обычные (или убирает
-    их для zero-width space). Возвращает (текст, список '<кодпоинт> x N')."""
     fixes = []
     for bad_char, replacement in _UNICODE_SPACES.items():
         count = text.count(bad_char)
@@ -129,8 +97,6 @@ def _fix_unicode_whitespace(text):
 
 
 def _fix_smart_quotes(text):
-    """Заменяет типографские кавычки на прямые ASCII. Возвращает (текст,
-    список '<символ> x N')."""
     fixes = []
     for bad_char, replacement in _SMART_QUOTES.items():
         count = text.count(bad_char)
@@ -138,6 +104,7 @@ def _fix_smart_quotes(text):
             fixes.append(f"'{bad_char}' x{count}")
             text = text.replace(bad_char, replacement)
     return text, fixes
+
 
 _TRAILING_COMMA_RE = re.compile(r",(\s*)\}")
 
@@ -151,8 +118,6 @@ def _fix_trailing_comma(text):
 
 
 def _detect_unsafe_issues(text):
-    """Детектирует проблемы, которые НЕ чинятся автоматически (риск испортить
-    реальный текст) — только предупреждение в лог, чтобы проверили руками."""
     warnings = []
     quote_count = text.count('"')
     if quote_count % 2 != 0:
@@ -172,11 +137,6 @@ def _detect_unsafe_issues(text):
 
 
 def sanitize_mib_text(text, mib_name):
-    """Прогоняет текст MIB через все безопасные автофиксы и диагностику.
-    Возвращает (исправленный_текст, fixes, warnings), где:
-      fixes    — список строк вида "<категория>: было -> стало" (что поправили)
-      warnings — список строк с проблемами, которые не тронули (нужна ручная проверка)
-    Ничего не пишет на диск — работает только с текстом в памяти."""
     fixes = []
 
     text, unicode_fixes = _fix_unicode_whitespace(text)
@@ -237,7 +197,6 @@ def find_files_with_any_keyword(directory, keywords):
         return []
 
     input_files = []
-    # Используем regex с границами слова — более точный поиск
     patterns = [re.compile(r'\b' + re.escape(keyword) + r'\b', re.IGNORECASE)
                 for keyword in keywords]
 
@@ -249,7 +208,6 @@ def find_files_with_any_keyword(directory, keywords):
                     with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
                         content = f.read()
 
-                    # Файл подходит, если содержит хотя бы одно ключевое слово
                     if any(pattern.search(content) for pattern in patterns):
                         file_name = os.path.splitext(file)[0]
                         input_files.append(file_name)
@@ -292,6 +250,63 @@ def read_mib_from_dirs(mib_name, dirs, fixes_log=None, warnings_log=None):
     return fixed_content
 
 
+def _format_syntax(syntax):
+    """Строит человекочитаемое представление SYNTAX из JSON-описания pysmi:
+    базовый тип + ограничения (enumeration или range), если есть."""
+    if not isinstance(syntax, dict):
+        return ""
+    base_type = syntax.get("type", "") or ""
+    constraints = syntax.get("constraints") or {}
+
+    enumeration = constraints.get("enumeration")
+    if enumeration:
+        items = []
+        for key, val in enumeration.items():
+            key_str = str(key)
+            if key_str.lstrip("-").isdigit():
+                items.append(f"{val}({key_str})")
+            else:
+                items.append(f"{key_str}({val})")
+        return f"{base_type} {{{', '.join(items)}}}"
+
+    range_constraint = constraints.get("range")
+    if range_constraint:
+        try:
+            parts = []
+            for r in range_constraint:
+                if isinstance(r, dict):
+                    parts.append(f"{r.get('min')}..{r.get('max')}")
+                else:
+                    parts.append(str(r))
+            return f"{base_type} (SIZE({', '.join(parts)}))"
+        except Exception:
+            pass
+
+    return base_type
+
+
+def _format_defval(defval):
+    """Приводит DEFVAL из JSON-описания pysmi к простой строке."""
+    if defval is None:
+        return ""
+    if isinstance(defval, dict):
+        return str(defval.get("value", defval))
+    return str(defval)
+
+
+def _format_indices(indices):
+    """Приводит INDEX/AUGMENTS из JSON-описания pysmi к строке имён через запятую."""
+    if not indices:
+        return ""
+    names = []
+    for idx in indices:
+        if isinstance(idx, dict):
+            names.append(idx.get("object", ""))
+        else:
+            names.append(str(idx))
+    return ", ".join(name for name in names if name)
+
+
 def parse_json_file(file_path):
     """Парсит скомпилированный JSON MIB и извлекает нужные поля."""
     try:
@@ -331,6 +346,11 @@ def parse_json_file(file_path):
                 "oid": oid,
                 "objects": objects,
                 "enumeration": enumeration,
+                "maxaccess": value.get("maxaccess", "") or "",
+                "status": value.get("status", "") or "",
+                "syntax_display": _format_syntax(value.get("syntax")),
+                "defval_display": _format_defval(value.get("defval")),
+                "indices_display": _format_indices(value.get("indices")),
             }
         )
     return parsed_data
@@ -338,7 +358,10 @@ def parse_json_file(file_path):
 
 def _save_to_csv_buffer(parsed_data):
     f = io.StringIO()
-    fieldnames = ["file_name", "class", "nodetype", "name", "oid", "objects", "enumeration"]
+    fieldnames = [
+        "file_name", "class", "nodetype", "name", "oid", "objects", "enumeration",
+        "maxaccess", "status", "syntax_display", "defval_display", "indices_display",
+    ]
     writer = csv.DictWriter(f, fieldnames=fieldnames)
     writer.writeheader()
     for item in parsed_data:
@@ -351,6 +374,11 @@ def _save_to_csv_buffer(parsed_data):
                 "oid": item["oid"],
                 "objects": ", ".join(item["objects"]),
                 "enumeration": str(item["enumeration"]),
+                "maxaccess": item["maxaccess"],
+                "status": item["status"],
+                "syntax_display": item["syntax_display"],
+                "defval_display": item["defval_display"],
+                "indices_display": item["indices_display"],
             }
         )
     f.seek(0)
@@ -404,8 +432,7 @@ def parse_mib_file(file_path):
 
 
 def collect_notifications(dirs):
-    """Обрабатывает .mib файлы из нескольких папок (рекурсивно, включая
-    произвольно вложенные подпапки) для поиска NOTIFICATION-TYPE."""
+    """Обрабатывает .mib файлы из нескольких папок (рекурсивно) для поиска NOTIFICATION-TYPE."""
     all_results = []
     processed_names = set()
 
@@ -458,7 +485,6 @@ def run_pipeline(input_dir, output_dir, log_callback=None, keywords=None):
     keywords_str = ", ".join(keywords)
     log(f"Поиск файлов с типами: {keywords_str} (рекурсивно по всем подпапкам)...")
 
-    # ←←← Главное изменение
     input_files = find_files_with_any_keyword(input_dir, keywords)
 
     log(f"Найдено файлов: {len(input_files)}")
@@ -522,7 +548,6 @@ def run_pipeline(input_dir, output_dir, log_callback=None, keywords=None):
 
     compiled_count = sum(1 for v in results.values() if str(v) == "compiled")
 
-    # --- Сбор ошибок компиляции (оставляем без изменений) ---
     error_pattern = re.compile(r"failing on .*? at MIB\s+(\S+?),\s+line\s+(\d+)")
     errors_found = []
     seen = set()
@@ -551,7 +576,6 @@ def run_pipeline(input_dir, output_dir, log_callback=None, keywords=None):
         log(fallback_line)
         errors_found.append((mib_name, "?", fallback_line + " (детальная причина не найдена)"))
 
-    # Остальная часть функции остаётся без изменений (парсинг JSON, CSV, ошибки и т.д.)
     log("Сбор данных из скомпилированных JSON...")
     virtual_file = process_compiled_directory(dst_directory)
     df = pd.read_csv(virtual_file, delimiter=",")
