@@ -48,8 +48,19 @@ KEYWORD_OPTIONS = {
     "MODULE-IDENTITY": False,
 }
 
-# Поля атрибутов объекта, показываемые в панели снизу дерева MIB, и то, каким
-# ключом они достаются из строки DataFrame (см. mib_core.parse_json_file).
+# Варианты типа объекта (JSON-поле "class" из pysmi) для фильтра дерева MIB.
+# По умолчанию показываем всё — в отличие от KEYWORD_OPTIONS (которые
+# определяют, какие ФАЙЛЫ вообще компилировать), здесь речь о том, какие
+# уже скомпилированные объекты показать в дереве-браузере.
+TREE_TYPE_OPTIONS = {
+    "OBJECT-TYPE": True,
+    "NOTIFICATION-TYPE": True,
+    "MODULE-IDENTITY": True,
+    "OBJECT-IDENTITY": True,
+}
+
+# Поля атрибутов объекта, показываемые в панели снизу дерева MIB (кроме
+# Descr и Objects — те выводятся отдельно, ниже, в развёрнутом виде).
 DETAIL_FIELDS = [
     ("Name", "name"),
     ("OID", "oid"),
@@ -62,17 +73,43 @@ DETAIL_FIELDS = [
 ]
 
 
+def _normalize_type_name(value):
+    """Приводит 'OBJECT-TYPE' / 'objecttype' / None к единому виду для
+    сравнения выбранных чекбоксов с JSON-полем 'class' из pysmi."""
+    if not value:
+        return ""
+    return str(value).replace("-", "").replace("_", "").lower()
+
+
+def _format_detail_value(value):
+    """Приводит значение атрибута к отображаемой строке. Списки (например,
+    'objects') соединяются через запятую вместо python-репрезентации."""
+    if value is None:
+        return ""
+    if isinstance(value, list):
+        return ", ".join(str(v) for v in value)
+    # pandas может отдать NaN как float; не показываем его как "nan"
+    try:
+        import math
+        if isinstance(value, float) and math.isnan(value):
+            return ""
+    except Exception:
+        pass
+    return str(value)
+
+
 # Фоновый поток, чтобы GUI не подвисал во время компиляции MIB
 class PipelineThread(QThread):
     log_line = Signal(str)
     finished_ok = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self, input_dir, output_dir, keywords: list, parent=None):
+    def __init__(self, input_dir, output_dir, keywords: list, detect_unsafe_issues: bool, parent=None):
         super().__init__(parent)
         self.input_dir = input_dir
         self.output_dir = output_dir
-        self.keywords = keywords          # ← список
+        self.keywords = keywords
+        self.detect_unsafe_issues = detect_unsafe_issues
 
     def run(self):
         try:
@@ -81,6 +118,7 @@ class PipelineThread(QThread):
                 self.output_dir,
                 log_callback=self.log_line.emit,
                 keywords=self.keywords,
+                detect_unsafe_issues=self.detect_unsafe_issues,
             )
             self.finished_ok.emit(result)
         except Exception as e:
@@ -128,6 +166,7 @@ class MainWindow(QMainWindow):
 
         self.thread = None
         self.last_result = None
+        self._last_df = None  # DataFrame последнего успешного прогона (для фильтров дерева)
 
         self._build_ui()
         self._create_menu()
@@ -277,6 +316,23 @@ class MainWindow(QMainWindow):
         parse_form.addLayout(btn_row)
 
         layout.addWidget(parse_group)
+
+        # --- Дополнительные опции парсинга ----------------------------
+        options_group = QGroupBox("Дополнительно")
+        options_form = QVBoxLayout(options_group)
+
+        self.check_detect_unsafe = QCheckBox("Проверять потенциальные проблемы")
+        self.check_detect_unsafe.setChecked(True)
+        self.check_detect_unsafe.setToolTip(
+            "Диагностика непарных кавычек \" и фигурных скобок { } в MIB-файлах.\n"
+            "Файлы при этом не изменяются — это только предупреждение в лог.\n"
+            "Отключите, если такие предупреждения мешают (например, если они\n"
+            "срабатывают на старом закомментированном коде)."
+        )
+        options_form.addWidget(self.check_detect_unsafe)
+
+        layout.addWidget(options_group)
+
         layout.addStretch()
 
         self.btn_run = QPushButton(
@@ -320,9 +376,6 @@ class MainWindow(QMainWindow):
         panel = QWidget()
 
         layout = QVBoxLayout(panel)
-
-        layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(10)
 
         log_box = QGroupBox(
             "Журнал выполнения"
@@ -406,18 +459,37 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_mib_tree_tab(self):
-        """Вкладка 'Дерево MIB': иерархия объектов по OID сверху, атрибуты
-        выбранного объекта (Name, OID, Mib, Syntax, Access, Status, DefVal,
-        Indexes, Descr) — снизу, как в MIB Browser."""
+        """Вкладка 'Дерево MIB': иерархия объектов по OID сверху (с поиском
+        и фильтром по типу объекта), атрибуты выбранного объекта — снизу,
+        как в MIB Browser."""
 
         panel = QWidget()
         layout = QVBoxLayout(panel)
 
         splitter = QSplitter(Qt.Vertical)
 
-        # --- Дерево ----------------------------------------------------
+        # --- Дерево + поиск + фильтр по типу ----------------------------
         tree_box = QGroupBox("Дерево MIB (иерархия по OID)")
         tree_layout = QVBoxLayout(tree_box)
+
+        search_row = QHBoxLayout()
+        search_row.addWidget(QLabel("Поиск:"))
+        self.tree_search_edit = QLineEdit()
+        self.tree_search_edit.setPlaceholderText("Введите часть имени объекта...")
+        self.tree_search_edit.textChanged.connect(self._apply_tree_search_filter)
+        search_row.addWidget(self.tree_search_edit)
+        tree_layout.addLayout(search_row)
+
+        type_filter_box = QGroupBox("Показывать типы")
+        type_filter_layout = QHBoxLayout(type_filter_box)
+        self.tree_type_checkboxes = {}
+        for type_name, default_checked in TREE_TYPE_OPTIONS.items():
+            cb = QCheckBox(type_name)
+            cb.setChecked(default_checked)
+            cb.stateChanged.connect(self._on_tree_type_filter_changed)
+            self.tree_type_checkboxes[type_name] = cb
+            type_filter_layout.addWidget(cb)
+        tree_layout.addWidget(type_filter_box)
 
         self.mib_tree = QTreeWidget()
         self.mib_tree.setHeaderLabels(["Объект"])
@@ -440,15 +512,24 @@ class MainWindow(QMainWindow):
             detail_layout.addWidget(edit, row, 1)
             self.detail_fields[label_text] = edit
 
-        descr_row = len(DETAIL_FIELDS)
+        objects_row = len(DETAIL_FIELDS)
+        detail_layout.addWidget(QLabel("Objects:"), objects_row, 0)
+        objects_edit = QLineEdit()
+        objects_edit.setReadOnly(True)
+        detail_layout.addWidget(objects_edit, objects_row, 1)
+        self.detail_fields["Objects"] = objects_edit
+
+        descr_row = objects_row + 1
         detail_layout.addWidget(QLabel("Descr:"), descr_row, 0, Qt.AlignTop)
         self.descr_view = QPlainTextEdit()
         self.descr_view.setReadOnly(True)
-        self.descr_view.setMaximumHeight(110)
+        # Ограничение по высоте снято намеренно — описание может быть длинным,
+        # пусть растягивается вместе с панелью (см. setRowStretch ниже).
         detail_layout.addWidget(self.descr_view, descr_row, 1)
+        detail_layout.setRowStretch(descr_row, 1)
 
         splitter.addWidget(detail_box)
-        splitter.setSizes([550, 250])
+        splitter.setSizes([500, 350])
 
         layout.addWidget(splitter)
 
@@ -474,24 +555,18 @@ class MainWindow(QMainWindow):
                 color: black;
             }
             QMainWindow {
-                background: #F7F7F7;
+                background:#F0F0F0;
             }
             QGroupBox {
                 border: 1px solid #B8B8B8;
-                border-radius: 6px;
-                margin-top: 16px;
-                padding-top: 10px;
-                background: #FAFAFA;
+                margin-top: 8px;
+                padding: 6px;
                 font-weight: bold;
+                background: #FAFAFA;
             }
-
             QGroupBox::title {
                 subcontrol-origin: margin;
-                subcontrol-position: top left;
-                left: 12px;
-                padding: 0 6px;
-                background: #FAFAFA;
-                color: black;
+                left: 8px;
             }
             QLineEdit {
                 border: 1px solid #999;
@@ -513,10 +588,10 @@ class MainWindow(QMainWindow):
                 background: #DCDCDC;
             }
             QPlainTextEdit {
-                background: #2B2B2B;
-                color: #F0F0F0;
-                border: 1px solid #B8B8B8;
-                border-radius: 4px;
+                background: #1E1E1E;
+                color: #D4D4D4;
+                border: 1px solid #555555;
+                selection-background-color: #3A6EA5;
             }
             QTableWidget {
                 background: white;
@@ -583,7 +658,8 @@ class MainWindow(QMainWindow):
         keywords_str = ", ".join(selected_keywords)
         self._append_log(f"Запуск парсинга (типы: {keywords_str})...", level="STAGE")
 
-        self.thread = PipelineThread(input_dir, output_dir, selected_keywords)
+        detect_unsafe = self.check_detect_unsafe.isChecked()
+        self.thread = PipelineThread(input_dir, output_dir, selected_keywords, detect_unsafe)
         self.thread.log_line.connect(self._append_log)
         self.thread.finished_ok.connect(self._on_finished)
         self.thread.failed.connect(self._on_failed)
@@ -600,6 +676,7 @@ class MainWindow(QMainWindow):
             )
 
     def _clear_mib_tree(self):
+        self._last_df = None
         self.mib_tree.clear()
         self._clear_detail_fields()
 
@@ -657,18 +734,32 @@ class MainWindow(QMainWindow):
         )
 
     # ------------------------------------------------------- дерево MIB ---
-    def _populate_mib_tree(self, df):
-        """Строит иерархическое дерево объектов по OID (как в MIB Browser).
+    def _get_selected_tree_types(self):
+        return {
+            _normalize_type_name(type_name)
+            for type_name, cb in self.tree_type_checkboxes.items()
+            if cb.isChecked()
+        }
 
-        Родителем объекта считается объект из этого же набора данных с
-        наибольшим по длине OID, являющимся строгим префиксом OID текущего
-        объекта. Если такого нет — объект становится корневым узлом дерева.
-        Объекты без валидного числового OID (например, определения типов
-        TEXTUAL-CONVENTION) в дереве не показываются — у них просто нет OID.
-        """
+    def _on_tree_type_filter_changed(self, _state):
+        self._rebuild_mib_tree()
+        self._apply_tree_search_filter(self.tree_search_edit.text())
+
+    def _rebuild_mib_tree(self):
+        """Полностью перестраивает дерево из self._last_df с учётом текущих
+        отметок фильтра типов. Нужен полный ребилд (а не просто скрытие
+        узлов), потому что иерархия должна строиться заново среди ТОЛЬКО
+        выбранных типов — иначе объект, чей "родитель" по OID отфильтрован,
+        должен подняться на уровень выше (или стать корнем)."""
         self.mib_tree.clear()
+        self._clear_detail_fields()
 
+        df = self._last_df
         if df is None or len(df) == 0:
+            return
+
+        selected_types = self._get_selected_tree_types()
+        if not selected_types:
             return
 
         records = df.to_dict(orient="records")
@@ -683,6 +774,8 @@ class MainWindow(QMainWindow):
             except ValueError:
                 continue
             if not oid_tuple:
+                continue
+            if _normalize_type_name(rec.get("class")) not in selected_types:
                 continue
             rec["_oid_tuple"] = oid_tuple
             valid_records.append(rec)
@@ -716,11 +809,39 @@ class MainWindow(QMainWindow):
             else:
                 self.mib_tree.addTopLevelItem(item)
 
-            # Если OID повторяется (редкий случай — объект встретился дважды),
-            # оставляем в индексе первый узел, чтобы не путать родителей.
             items_by_oid.setdefault(oid_tuple, item)
 
         self.mib_tree.expandToDepth(1)
+
+    def _populate_mib_tree(self, df):
+        """Точка входа после успешного прогона: запоминает df и строит дерево
+        с учётом текущих фильтров типа и поиска."""
+        self._last_df = df
+        self._rebuild_mib_tree()
+        self._apply_tree_search_filter(self.tree_search_edit.text())
+
+    def _apply_tree_search_filter(self, text):
+        """Показывает только узлы, чьё имя (или имя кого-то из потомков)
+        содержит текст поиска. Родительские узлы совпавших элементов
+        остаются видимыми (и раскрываются), чтобы путь был понятен."""
+        needle = text.strip().lower()
+
+        def _filter_item(item):
+            label = item.text(0).lower()
+            self_match = (not needle) or (needle in label)
+            child_match = False
+            for i in range(item.childCount()):
+                if _filter_item(item.child(i)):
+                    child_match = True
+            visible = self_match or child_match
+            item.setHidden(not visible)
+            if needle and child_match:
+                item.setExpanded(True)
+            return visible
+
+        root = self.mib_tree.invisibleRootItem()
+        for i in range(root.childCount()):
+            _filter_item(root.child(i))
 
     def _on_tree_selection_changed(self, current, _previous):
         if current is None:
@@ -733,11 +854,10 @@ class MainWindow(QMainWindow):
             return
 
         for label_text, key in DETAIL_FIELDS:
-            value = rec.get(key)
-            self.detail_fields[label_text].setText("" if value is None else str(value))
+            self.detail_fields[label_text].setText(_format_detail_value(rec.get(key)))
 
-        descr = rec.get("description")
-        self.descr_view.setPlainText("" if descr is None else str(descr))
+        self.detail_fields["Objects"].setText(_format_detail_value(rec.get("objects")))
+        self.descr_view.setPlainText(_format_detail_value(rec.get("description")))
 
     def _on_finished(self, result):
         self.btn_run.setEnabled(True)

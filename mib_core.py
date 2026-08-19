@@ -117,26 +117,93 @@ def _fix_trailing_comma(text):
     return fixed_text, [f"висячая запятая перед '}}' x{count}"]
 
 
+# -----------------------------------------------------------------------
+# Удаление комментариев для диагностики "непарных кавычек/скобок" — иначе
+# закомментированные (через "--") старые куски определений с забытыми
+# кавычками/скобками ложно засчитываются как реальные проблемы файла.
+# Комментарий SMI начинается с "--" и заканчивается следующим "--" либо
+# концом строки, в зависимости от того, что раньше. При этом "--" внутри
+# строкового литерала (в кавычках) комментарием не считается — поэтому
+# состояние "внутри строки" отслеживается отдельно и имеет приоритет.
+# -----------------------------------------------------------------------
+def _strip_comments(text):
+    result = []
+    i = 0
+    n = len(text)
+    in_string = False
+    while i < n:
+        ch = text[i]
+        if in_string:
+            result.append(ch)
+            if ch == '"':
+                in_string = False
+            i += 1
+            continue
+        if ch == '"':
+            in_string = True
+            result.append(ch)
+            i += 1
+            continue
+        if ch == "-" and i + 1 < n and text[i + 1] == "-":
+            j = i + 2
+            ended_by_dashes = False
+            while j < n:
+                if text[j] == "\n":
+                    break
+                if text[j] == "-" and j + 1 < n and text[j + 1] == "-":
+                    j += 2
+                    ended_by_dashes = True
+                    break
+                j += 1
+            else:
+                j = n
+            if not ended_by_dashes and j < n and text[j] == "\n":
+                result.append("\n")
+                i = j + 1
+            else:
+                i = j
+            continue
+        result.append(ch)
+        i += 1
+    return "".join(result)
+
+
 def _detect_unsafe_issues(text):
+    """Детектирует проблемы, которые НЕ чинятся автоматически (риск испортить
+    реальный текст) — только предупреждение в лог, чтобы проверили руками.
+    Комментарии (после "--") из проверки исключаются: закомментированный
+    старый код с забытыми кавычками/скобками — не реальная проблема файла."""
+    code_only = _strip_comments(text)
+
     warnings = []
-    quote_count = text.count('"')
+    quote_count = code_only.count('"')
     if quote_count % 2 != 0:
         warnings.append(
-            f"нечётное количество кавычек \" ({quote_count}) — похоже, где-то "
-            f"не закрыта строка (DESCRIPTION и т.п.); файл не тронут, нужна "
-            f"ручная проверка"
+            f"нечётное количество кавычек \" ({quote_count}) вне комментариев — "
+            f"похоже, где-то не закрыта строка (DESCRIPTION и т.п.); файл не "
+            f"тронут, нужна ручная проверка"
         )
-    open_braces = text.count("{")
-    close_braces = text.count("}")
+
+    code_no_strings = _QUOTED_STRING_RE.sub('""', code_only)
+    open_braces = code_no_strings.count("{")
+    close_braces = code_no_strings.count("}")
     if open_braces != close_braces:
         warnings.append(
-            f"не совпадает число '{{' ({open_braces}) и '}}' ({close_braces}) — "
-            f"похоже на незакрытый блок; файл не тронут, нужна ручная проверка"
+            f"не совпадает число '{{' ({open_braces}) и '}}' ({close_braces}) "
+            f"вне комментариев — похоже на незакрытый блок; файл не тронут, "
+            f"нужна ручная проверка"
         )
     return warnings
 
 
-def sanitize_mib_text(text, mib_name):
+def sanitize_mib_text(text, mib_name, detect_unsafe_issues=True):
+    """Прогоняет текст MIB через все безопасные автофиксы и (опционально)
+    диагностику непарных кавычек/скобок.
+    Возвращает (исправленный_текст, fixes, warnings), где:
+      fixes    — список строк вида "<категория>: было -> стало" (что поправили)
+      warnings — список строк с проблемами, которые не тронули (нужна ручная
+                 проверка); пустой список, если detect_unsafe_issues=False.
+    Ничего не пишет на диск — работает только с текстом в памяти."""
     fixes = []
 
     text, unicode_fixes = _fix_unicode_whitespace(text)
@@ -164,7 +231,7 @@ def sanitize_mib_text(text, mib_name):
                 f"первая буква): '{old}' -> '{new}'"
             )
 
-    warnings = _detect_unsafe_issues(text)
+    warnings = _detect_unsafe_issues(text) if detect_unsafe_issues else []
 
     return text, fixes, warnings
 
@@ -228,7 +295,7 @@ def find_mib_path(mib_name, dirs):
     return None
 
 
-def read_mib_from_dirs(mib_name, dirs, fixes_log=None, warnings_log=None):
+def read_mib_from_dirs(mib_name, dirs, fixes_log=None, warnings_log=None, detect_unsafe_issues=True):
     path = find_mib_path(mib_name, dirs)
     if path is None:
         searched = ", ".join(dirs)
@@ -239,7 +306,7 @@ def read_mib_from_dirs(mib_name, dirs, fixes_log=None, warnings_log=None):
     with open(path, encoding="utf-8", errors="ignore") as f:
         content = f.read()
 
-    fixed_content, fixes, warnings = sanitize_mib_text(content, mib_name)
+    fixed_content, fixes, warnings = sanitize_mib_text(content, mib_name, detect_unsafe_issues)
     if fixes and fixes_log is not None:
         for fix_description in fixes:
             fixes_log.append((path, fix_description))
@@ -456,9 +523,11 @@ def collect_notifications(dirs):
     return all_results
 
 
-def run_pipeline(input_dir, output_dir, log_callback=None, keywords=None):
+def run_pipeline(input_dir, output_dir, log_callback=None, keywords=None, detect_unsafe_issues=True):
     """
     параметр keywords: список строк, например ["NOTIFICATION-TYPE", "OBJECT-TYPE"]
+    параметр detect_unsafe_issues: включает/выключает диагностику непарных
+        кавычек/скобок в MIB-файлах (см. sanitize_mib_text/_detect_unsafe_issues)
     """
     if keywords is None:
         keywords = ["NOTIFICATION-TYPE"]
@@ -512,7 +581,9 @@ def run_pipeline(input_dir, output_dir, log_callback=None, keywords=None):
     sanitizer_warnings = []
     mib_compiler.add_sources(
         CallbackReader(
-            lambda m, c: read_mib_from_dirs(m, mib_dirs, sanitizer_fixes, sanitizer_warnings)
+            lambda m, c: read_mib_from_dirs(
+                m, mib_dirs, sanitizer_fixes, sanitizer_warnings, detect_unsafe_issues
+            )
         )
     )
     mib_compiler.add_searchers(StubSearcher(*JsonCodeGen.baseMibs))
@@ -536,7 +607,9 @@ def run_pipeline(input_dir, output_dir, log_callback=None, keywords=None):
         for path, fix_description in sanitizer_fixes:
             log(f"    {path}: {fix_description}")
 
-    if sanitizer_warnings:
+    if not detect_unsafe_issues:
+        log("Проверка потенциальных проблем (непарные кавычки/скобки) отключена.")
+    elif sanitizer_warnings:
         log(
             f"Обнаружено {len(sanitizer_warnings)} потенциальных проблем, которые НЕ "
             f"были исправлены автоматически (нужна ручная проверка):"
@@ -617,18 +690,31 @@ def run_pipeline(input_dir, output_dir, log_callback=None, keywords=None):
     log(f"CSV сохранён: {output_csv}")
 
     error_log_path = None
-    if errors_found:
+    if errors_found or (detect_unsafe_issues and sanitizer_warnings):
         error_log_path = os.path.join(output_dir, "mib_compile_errors.log")
         with open(error_log_path, "w", encoding="utf-8") as err_file:
-            for mib_name, line_no, raw_log_line in errors_found:
-                mib_file_path = find_mib_path(mib_name, mib_dirs) or (
-                    f"{mib_name}.mib (не найден)"
+            if errors_found:
+                err_file.write(f"=== Ошибки компиляции ({len(errors_found)}) ===\n")
+                for mib_name, line_no, raw_log_line in errors_found:
+                    mib_file_path = find_mib_path(mib_name, mib_dirs) or (
+                        f"{mib_name}.mib (не найден)"
+                    )
+                    err_file.write("\n")
+                    err_file.write(f"{datetime.datetime.now()} \n")
+                    err_file.write(f"Файл: {mib_file_path}, строка: {line_no}\n")
+                    err_file.write(f"Исходный лог: {raw_log_line}\n")
+
+            if detect_unsafe_issues and sanitizer_warnings:
+                err_file.write(
+                    f"\n\n=== Потенциальные проблемы, не исправленные автоматически "
+                    f"({len(sanitizer_warnings)}) ===\n"
                 )
-                err_file.write("\n")
-                err_file.write(f"{datetime.datetime.now()} \n")
-                err_file.write(f"Файл: {mib_file_path}, строка: {line_no}\n")
-                err_file.write(f"Исходный лог: {raw_log_line}\n")
-        log(f"Ошибки компиляции сохранены в: {error_log_path}")
+                for path, warning_text in sanitizer_warnings:
+                    err_file.write("\n")
+                    err_file.write(f"Файл: {path}\n")
+                    err_file.write(f"{warning_text}\n")
+
+        log(f"Ошибки/предупреждения сохранены в: {error_log_path}")
     else:
         log("Ошибок компиляции не обнаружено.")
 
