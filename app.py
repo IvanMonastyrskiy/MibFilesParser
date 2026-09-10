@@ -239,8 +239,8 @@ class MainWindow(QMainWindow):
         panel = QWidget()
 
         layout = QVBoxLayout(panel)
-
-        layout.setSpacing(8)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
 
         group = QGroupBox("Файлы")
 
@@ -253,7 +253,7 @@ class MainWindow(QMainWindow):
         self.input_dir_edit = QLineEdit()
 
         btn1 = QPushButton("...")
-
+        btn1.setFixedWidth(36)
         btn1.clicked.connect(
             self._browse_input_dir
         )
@@ -275,7 +275,7 @@ class MainWindow(QMainWindow):
         self.output_dir_edit = QLineEdit()
 
         btn2 = QPushButton("...")
-
+        btn2.setFixedWidth(36)
         btn2.clicked.connect(
             self._browse_output_dir
         )
@@ -338,6 +338,8 @@ class MainWindow(QMainWindow):
         self.btn_run = QPushButton(
             "Запустить"
         )
+
+        self.btn_run.setObjectName("primaryButton")
 
         self.btn_run.clicked.connect(
             self._start_pipeline
@@ -481,7 +483,11 @@ class MainWindow(QMainWindow):
         tree_layout.addLayout(search_row)
 
         type_filter_box = QGroupBox("Показывать типы")
+        type_filter_box.setObjectName("treeTypeFilter")
+        type_filter_box.setMaximumHeight(55)
         type_filter_layout = QHBoxLayout(type_filter_box)
+        type_filter_layout.setContentsMargins(8, 4, 8, 4)
+        type_filter_layout.setSpacing(10)
         self.tree_type_checkboxes = {}
         for type_name, default_checked in TREE_TYPE_OPTIONS.items():
             cb = QCheckBox(type_name)
@@ -501,35 +507,103 @@ class MainWindow(QMainWindow):
 
         # --- Атрибуты выбранного объекта --------------------------------
         detail_box = QGroupBox("Атрибуты выбранного объекта")
+
         detail_layout = QGridLayout(detail_box)
+
+        # Делаем внутренние отступы и расстояния между строками компактнее
+        detail_layout.setContentsMargins(8, 8, 8, 8)
+        detail_layout.setHorizontalSpacing(6)
+        detail_layout.setVerticalSpacing(3)
+
+        # Вторая колонка с полями растягивается
         detail_layout.setColumnStretch(1, 1)
 
         self.detail_fields = {}
+
         for row, (label_text, _key) in enumerate(DETAIL_FIELDS):
-            detail_layout.addWidget(QLabel(label_text + ":"), row, 0)
+            label = QLabel(label_text + ":")
+            label.setMinimumWidth(55)
+
+            detail_layout.addWidget(label, row, 0)
+
             edit = QLineEdit()
             edit.setReadOnly(True)
+
+            # Уменьшаем высоту поля
+            edit.setFixedHeight(24)
+
             detail_layout.addWidget(edit, row, 1)
+
             self.detail_fields[label_text] = edit
 
+        # --- Objects -----------------------------------------------------
+
         objects_row = len(DETAIL_FIELDS)
-        detail_layout.addWidget(QLabel("Objects:"), objects_row, 0)
+
+        objects_label = QLabel("Objects:")
+        objects_label.setMinimumWidth(55)
+
+        detail_layout.addWidget(
+            objects_label,
+            objects_row,
+            0
+        )
+
         objects_edit = QLineEdit()
         objects_edit.setReadOnly(True)
-        detail_layout.addWidget(objects_edit, objects_row, 1)
+
+        # Уменьшаем высоту поля
+        objects_edit.setFixedHeight(24)
+
+        detail_layout.addWidget(
+            objects_edit,
+            objects_row,
+            1
+        )
+
         self.detail_fields["Objects"] = objects_edit
 
+        # --- Descr -------------------------------------------------------
+
         descr_row = objects_row + 1
-        detail_layout.addWidget(QLabel("Descr:"), descr_row, 0, Qt.AlignTop)
+
+        descr_label = QLabel("Descr:")
+        descr_label.setAlignment(Qt.AlignTop)
+
+        detail_layout.addWidget(
+            descr_label,
+            descr_row,
+            0
+        )
+
         self.descr_view = QPlainTextEdit()
         self.descr_view.setReadOnly(True)
-        # Ограничение по высоте снято намеренно — описание может быть длинным,
-        # пусть растягивается вместе с панелью (см. setRowStretch ниже).
-        detail_layout.addWidget(self.descr_view, descr_row, 1)
+
+        # Минимальная высота описания,
+        # но при увеличении панели оно всё равно может растягиваться
+        self.descr_view.setMinimumHeight(70)
+
+        detail_layout.addWidget(
+            self.descr_view,
+            descr_row,
+            1
+        )
+
+        # Только описание получает дополнительное свободное место
         detail_layout.setRowStretch(descr_row, 1)
 
+        # --- Добавляем панель атрибутов в вертикальный splitter ---------
+
         splitter.addWidget(detail_box)
-        splitter.setSizes([500, 350])
+
+        # По умолчанию больше места отдаём дереву MIB
+        splitter.setSizes([600, 250])
+
+        # Не даём верхней части с поиском и фильтрами полностью исчезнуть
+        tree_box.setMinimumHeight(250)
+
+        # Минимальная высота панели атрибутов
+        detail_box.setMinimumHeight(200)
 
         layout.addWidget(splitter)
 
@@ -542,75 +616,293 @@ class MainWindow(QMainWindow):
         return lbl
 
     def _apply_style(self):
-
         self.setStyleSheet(
-            """ 
-            QMenuBar {
-                background-color: #D3D3D3;
-                color: white;
-            }
+            """
+            /* ---- базовые ---- */
             QWidget {
-                font-family: Segoe UI;
-                font-size: 9pt;
-                color: black;
+                font-family: "Segoe UI", "Inter", system-ui, sans-serif;
+                font-size: 13px;
+                color: #1f2937;
             }
             QMainWindow {
-                background:#F0F0F0;
+                background: #f4f5f7;
             }
+            QStatusBar {
+                background: #eef0f3;
+                color: #6b7280;
+                border-top: 1px solid #e5e7eb;
+            }
+            QMenuBar {
+                background: #eef0f3;
+                color: #1f2937;
+                border-bottom: 1px solid #e5e7eb;
+                padding: 2px 0;
+            }
+            QMenuBar::item {
+                padding: 4px 10px;
+                background: transparent;
+            }
+            QMenuBar::item:selected {
+                background: #e5e7eb;
+                border-radius: 4px;
+            }
+            QMenu {
+                background: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-radius: 6px;
+                padding: 4px;
+            }
+            QMenu::item {
+                padding: 6px 24px 6px 12px;
+                border-radius: 4px;
+            }
+            QMenu::item:selected {
+                background: #f3f4f6;
+            }
+
+            /* ---- группы ---- */
             QGroupBox {
-                border: 1px solid #B8B8B8;
-                margin-top: 8px;
-                padding: 6px;
-                font-weight: bold;
-                background: #FAFAFA;
+                background: #ffffff;
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                margin-top: 12px;
+                padding: 12px 10px 10px 10px;
+                font-weight: 600;
+                color: #374151;
             }
             QGroupBox::title {
                 subcontrol-origin: margin;
-                left: 8px;
+                left: 12px;
+                padding: 0 6px;
+                color: #4b5563;
+                background: #ffffff;
             }
-            QLineEdit {
-                border: 1px solid #999;
-                padding: 3px;
-                background: white;
+
+            /* ---- поля ввода ---- */
+            QLineEdit, QComboBox {
+                background: #ffffff;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                padding: 5px 8px;
+                selection-background-color: #dbeafe;
             }
-            QComboBox {
-                border: 1px solid #999;
-                padding: 3px;
-                background: white;
+            QLineEdit:focus, QComboBox:focus {
+                border: 1px solid #93c5fd;
             }
+            QLineEdit:disabled {
+                background: #f9fafb;
+                color: #9ca3af;
+            }
+            /* ---- компактные галочки фильтра дерева MIB ---- */
+
+QGroupBox#treeTypeFilter QCheckBox {
+    spacing: 5px;
+}
+
+
+QGroupBox#treeTypeFilter QCheckBox::indicator {
+    width: 13px;
+    height: 13px;
+    border-radius: 3px;
+}
+            /* ---- кнопки ---- */
             QPushButton {
-                min-height: 24px;
-                padding: 3px 10px;
-                border: 1px solid #888;
-                background: #EAEAEA;
+                background: #ffffff;
+                border: 1px solid #d1d5db;
+                border-radius: 6px;
+                padding: 6px 14px;
+                min-height: 26px;
+                color: #374151;
             }
             QPushButton:hover {
-                background: #DCDCDC;
+                background: #f9fafb;
+                border-color: #9ca3af;
             }
+            QPushButton:pressed {
+                background: #f3f4f6;
+            }
+            QPushButton:disabled {
+                background: #f3f4f6;
+                color: #9ca3af;
+                border-color: #e5e7eb;
+            }
+
+            /* главная кнопка запуска */
+            QPushButton#primaryButton {
+                background: #2563eb;
+                border: 1px solid #1d4ed8;
+                color: #ffffff;
+                font-weight: 600;
+            }
+            QPushButton#primaryButton:hover {
+                background: #1d4ed8;
+                border-color: #1e40af;
+            }
+            QPushButton#primaryButton:pressed {
+                background: #1e40af;
+            }
+            QPushButton#primaryButton:disabled {
+                background: #93c5fd;
+                border-color: #93c5fd;
+                color: #eff6ff;
+            }
+
+            /* ---- чекбоксы ---- */
+            QCheckBox {
+                spacing: 8px;
+                color: #374151;
+            }
+            QCheckBox::indicator {
+                width: 16px;
+                height: 16px;
+                border: 1px solid #d1d5db;
+                border-radius: 4px;
+                background: #ffffff;
+            }
+            QCheckBox::indicator:checked {
+                background: #2563eb;
+                border-color: #2563eb;
+            }
+            QCheckBox::indicator:hover {
+                border-color: #93c5fd;
+            }
+
+            /* ---- вкладки ---- */
+            QTabWidget::pane {
+                border: 1px solid #e5e7eb;
+                border-radius: 8px;
+                background: #ffffff;
+                top: -1px;
+            }
+            QTabBar::tab {
+                background: transparent;
+                border: none;
+                padding: 8px 16px;
+                margin-right: 2px;
+                color: #6b7280;
+                border-bottom: 2px solid transparent;
+            }
+            QTabBar::tab:selected {
+                color: #1f2937;
+                border-bottom: 2px solid #2563eb;
+                font-weight: 600;
+            }
+            QTabBar::tab:hover:!selected {
+                color: #374151;
+                background: #f9fafb;
+                border-radius: 4px 4px 0 0;
+            }
+
+            /* ---- лог ---- */
             QPlainTextEdit {
-                background: #1E1E1E;
-                color: #D4D4D4;
-                border: 1px solid #555555;
-                selection-background-color: #3A6EA5;
+                background: #1e1e1e;
+                color: #d4d4d4;
+                border: 1px solid #374151;
+                border-radius: 6px;
+                padding: 4px;
+                selection-background-color: #3b82f6;
+                font-family: "Consolas", "Cascadia Code", "Courier New", monospace;
+                font-size: 12px;
             }
-            QTableWidget {
-                background: white;
-                gridline-color: #BFBFBF;
-                border: 1px solid #999;
-            }
-            QTreeWidget {
-                background: white;
-                border: 1px solid #999;
-            }
+
+            /* ---- таблицы / дерево ---- */
+
+QTableWidget, QTreeWidget {
+    background: #ffffff;
+    border: 1px solid #e5e7eb;
+    border-radius: 6px;
+    gridline-color: #f3f4f6;
+    outline: none;
+}
+
+
+/* Элементы дерева */
+
+QTreeWidget::item {
+    padding: 4px 6px;
+}
+
+
+/* Выбранный объект */
+
+QTreeWidget::item:selected {
+    background: #dbeafe;
+    color: #1e3a8a;
+    border: none;
+}
+
+
+/* Объект, когда дерево активно */
+
+QTreeWidget::item:selected:active {
+    background: #bfdbfe;
+    color: #1e3a8a;
+}
+
+
+/* Убираем рамку фокуса */
+
+QTreeWidget::item:focus {
+    outline: none;
+    border: none;
+}
             QHeaderView::section {
-               background: #E0E0E0;
-                color: black;
-                border: 1px solid #999;
-                padding: 3px;
-                font-weight: bold;
+                background: #f9fafb;
+                color: #4b5563;
+                border: none;
+                border-bottom: 1px solid #e5e7eb;
+                border-right: 1px solid #f3f4f6;
+                padding: 6px 8px;
+                font-weight: 600;
             }
-            QStatusBar {
-                background: #E5E5E5;
+            
+
+            /* ---- сплиттер ---- */
+            QSplitter::handle {
+                background: #e5e7eb;
+            }
+            QSplitter::handle:horizontal {
+                width: 3px;
+            }
+            QSplitter::handle:vertical {
+                height: 3px;
+            }
+            QSplitter::handle:hover {
+                background: #93c5fd;
+            }
+
+            /* ---- скроллбары (минималистичные) ---- */
+            QScrollBar:vertical {
+                background: transparent;
+                width: 10px;
+                margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #d1d5db;
+                border-radius: 5px;
+                min-height: 30px;
+            }
+            QScrollBar::handle:vertical:hover {
+                background: #9ca3af;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+            QScrollBar:horizontal {
+                background: transparent;
+                height: 10px;
+                margin: 0;
+            }
+            QScrollBar::handle:horizontal {
+                background: #d1d5db;
+                border-radius: 5px;
+                min-width: 30px;
+            }
+            QScrollBar::handle:horizontal:hover {
+                background: #9ca3af;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0;
             }
             """
         )
