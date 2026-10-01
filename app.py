@@ -36,8 +36,10 @@ from PySide6.QtWidgets import (
     QTreeWidget,
     QTreeWidgetItem,
 )
-from jinja2.lexer import whitespace_re
+import ast
+import pandas as pd
 
+ALL_MODULES_LABEL = "Все модули"
 import mib_core
 
 # Варианты кодового слова, по которому отбираются MIB-файлы для компиляции.
@@ -80,6 +82,22 @@ def _normalize_type_name(value):
         return ""
     return str(value).replace("-", "").replace("_", "").lower()
 
+def _parse_objects_cell(value):
+    """Столбец 'objects' из CSV -> список строк. Понимает и "['a', 'b']"
+    (так пишет to_csv для списка), и 'a, b'."""
+    if isinstance(value, list):
+        return value
+    text = str(value).strip() if value is not None else ""
+    if not text:
+        return []
+    if text.startswith("["):
+        try:
+            parsed = ast.literal_eval(text)
+            if isinstance(parsed, (list, tuple)):
+                return [str(v) for v in parsed]
+        except (ValueError, SyntaxError):
+            pass
+    return [p.strip() for p in text.split(",") if p.strip()]
 
 def _format_detail_value(value):
     """Приводит значение атрибута к отображаемой строке. Списки (например,
@@ -179,6 +197,9 @@ class MainWindow(QMainWindow):
         file_menu = menu.addMenu("Файл")
         open_input = file_menu.addAction("Открыть папку MIB...")
         open_input.triggered.connect(self._browse_input_dir)
+
+        load_csv = file_menu.addAction("Загрузить output_mib.csv...")
+        load_csv.triggered.connect(self._load_csv_file)
 
         open_output = file_menu.addAction("Открыть папку результата")
         open_output.triggered.connect(self._open_output_folder)
@@ -364,14 +385,10 @@ class MainWindow(QMainWindow):
         return panel
 
     def _build_right_panel(self):
-        """Правая часть окна — вкладки: 'Журнал и статистика' и 'Дерево MIB'."""
-
-        tabs = QTabWidget()
-
-        tabs.addTab(self._build_log_tab(), "Журнал и статистика")
-        tabs.addTab(self._build_mib_tree_tab(), "Дерево MIB")
-
-        return tabs
+        self.right_tabs = QTabWidget()
+        self.right_tabs.addTab(self._build_log_tab(), "Журнал и статистика")
+        self.right_tabs.addTab(self._build_mib_tree_tab(), "Дерево MIB")
+        return self.right_tabs
 
     def _build_log_tab(self):
 
@@ -460,6 +477,61 @@ class MainWindow(QMainWindow):
 
         return panel
 
+    def _load_csv_file(self):
+        start_dir = self.output_dir_edit.text().strip()
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Выберите output_mib.csv", start_dir, "CSV (*.csv);;Все файлы (*)"
+        )
+        if not path:
+            return
+        try:
+            df = pd.read_csv(path, sep=";", dtype=str, keep_default_na=False,
+                             encoding="utf-8-sig")
+        except Exception as e:
+            QMessageBox.critical(self, "Ошибка чтения CSV", f"{path}\n\n{e}")
+            return
+
+        missing = {"name", "oid", "class", "file_name"} - set(df.columns)
+        if missing:
+            QMessageBox.warning(
+                self, "Неподходящий CSV",
+                "В файле нет обязательных столбцов: " + ", ".join(sorted(missing))
+            )
+            return
+
+        if "objects" in df.columns:
+            df["objects"] = df["objects"].apply(_parse_objects_cell)
+        else:
+            df["objects"] = [[] for _ in range(len(df))]
+
+        self.right_tabs.setCurrentIndex(1)
+        self._populate_mib_tree(df)
+        self.statusBar().showMessage(f"Загружен CSV: {path} ({len(df)} объектов)")
+
+    def _refresh_module_combo(self, df):
+        """Заполняет выпадающий список уникальными значениями file_name.
+        Первый пункт — «Все модули» (без фильтрации); выбор сбрасывается на него."""
+        self.tree_module_combo.blockSignals(True)
+        self.tree_module_combo.clear()
+        self.tree_module_combo.addItem(ALL_MODULES_LABEL)
+        if df is not None and "file_name" in df.columns:
+            names = sorted(
+                {str(n) for n in df["file_name"] if str(n).strip() and str(n) != "nan"},
+                key=str.lower,
+            )
+            self.tree_module_combo.addItems(names)
+        self.tree_module_combo.setCurrentIndex(0)
+        self.tree_module_combo.blockSignals(False)
+
+    def _get_selected_module(self):
+        """None — показывать все модули."""
+        if self.tree_module_combo.currentIndex() <= 0:
+            return None
+        return self.tree_module_combo.currentText()
+
+    def _on_tree_module_filter_changed(self, _index):
+        self._rebuild_mib_tree()
+        self._apply_tree_search_filter(self.tree_search_edit.text())
     def _build_mib_tree_tab(self):
         """Вкладка 'Дерево MIB': иерархия объектов по OID сверху (с поиском
         и фильтром по типу объекта), атрибуты выбранного объекта — снизу,
@@ -474,10 +546,23 @@ class MainWindow(QMainWindow):
         tree_box = QGroupBox("Дерево MIB (иерархия по OID)")
         tree_layout = QVBoxLayout(tree_box)
 
+        source_row = QHBoxLayout()
+        self.btn_load_csv = QPushButton("Загрузить CSV...")
+        self.btn_load_csv.clicked.connect(self._load_csv_file)
+        source_row.addWidget(self.btn_load_csv)
+
+        source_row.addWidget(QLabel("Модуль:"))
+        self.tree_module_combo = QComboBox()
+        self.tree_module_combo.addItem(ALL_MODULES_LABEL)
+        self.tree_module_combo.setMinimumWidth(220)
+        self.tree_module_combo.currentIndexChanged.connect(self._on_tree_module_filter_changed)
+        source_row.addWidget(self.tree_module_combo, 1)
+        tree_layout.addLayout(source_row)
+
         search_row = QHBoxLayout()
         search_row.addWidget(QLabel("Поиск:"))
         self.tree_search_edit = QLineEdit()
-        self.tree_search_edit.setPlaceholderText("Введите часть имени объекта...")
+        self.tree_search_edit.setPlaceholderText("Имя объекта или OID (например, 1.3.6.1.4)...")
         self.tree_search_edit.textChanged.connect(self._apply_tree_search_filter)
         search_row.addWidget(self.tree_search_edit)
         tree_layout.addLayout(search_row)
@@ -693,6 +778,23 @@ class MainWindow(QMainWindow):
                 background: #f9fafb;
                 color: #9ca3af;
             }
+            
+            QComboBox {
+    background: #ffffff;
+    color: #000000;
+}
+QComboBox QAbstractItemView {
+    background: #ffffff;
+    color: #000000;
+    border: 1px solid #d1d5db;
+    outline: none;
+    selection-background-color: #dbeafe;
+    selection-color: #000000;
+}
+QComboBox QAbstractItemView::item {
+    min-height: 24px;
+    padding: 2px 6px;
+}
             /* ---- компактные галочки фильтра дерева MIB ---- */
 
 QGroupBox#treeTypeFilter QCheckBox {
@@ -971,6 +1073,7 @@ QTreeWidget::item:focus {
         self._last_df = None
         self.mib_tree.clear()
         self._clear_detail_fields()
+        self._refresh_module_combo(None)
 
     def _clear_detail_fields(self):
         for edit in self.detail_fields.values():
@@ -1057,9 +1160,13 @@ QTreeWidget::item:focus {
         records = df.to_dict(orient="records")
 
         valid_records = []
+        selected_module = self._get_selected_module()
         for rec in records:
+
             oid_str = rec.get("oid")
             if not oid_str or not isinstance(oid_str, str):
+                continue
+            if selected_module is not None and str(rec.get("file_name") or "") != selected_module:
                 continue
             try:
                 oid_tuple = tuple(int(part) for part in oid_str.strip().split("."))
@@ -1106,9 +1213,8 @@ QTreeWidget::item:focus {
         self.mib_tree.expandToDepth(1)
 
     def _populate_mib_tree(self, df):
-        """Точка входа после успешного прогона: запоминает df и строит дерево
-        с учётом текущих фильтров типа и поиска."""
         self._last_df = df
+        self._refresh_module_combo(df)
         self._rebuild_mib_tree()
         self._apply_tree_search_filter(self.tree_search_edit.text())
 
@@ -1119,8 +1225,10 @@ QTreeWidget::item:focus {
         needle = text.strip().lower()
 
         def _filter_item(item):
-            label = item.text(0).lower()
-            self_match = (not needle) or (needle in label)
+            rec = item.data(0, Qt.UserRole) or {}
+            name = str(rec.get("name") or "").lower()
+            oid = str(rec.get("oid") or "").lower()
+            self_match = (not needle) or (needle in name) or (needle in oid)
             child_match = False
             for i in range(item.childCount()):
                 if _filter_item(item.child(i)):
